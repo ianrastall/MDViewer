@@ -157,15 +157,15 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private async Task OpenAsync()
     {
-        string? filePath = await _pickOpenFileAsync();
-
-        if (string.IsNullOrWhiteSpace(filePath))
-        {
-            return;
-        }
-
         try
         {
+            string? filePath = await _pickOpenFileAsync();
+
+            if (string.IsNullOrWhiteSpace(filePath))
+            {
+                return;
+            }
+
             await LoadFileAsync(filePath);
         }
         catch (Exception ex)
@@ -437,6 +437,11 @@ public partial class MainViewModel : ObservableObject
     {
         IsRawView = true;
         DocumentStatus = message;
+    }
+
+    public void ReportOpenFailure(Exception exception)
+    {
+        SetCommandFailureStatus("Open", exception);
     }
 
     private void SetCurrentMarkdown(string markdown, bool preserveViewMode)

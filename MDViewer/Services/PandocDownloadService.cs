@@ -51,7 +51,7 @@ public sealed class PandocDownloadService
             string downloadedPandoc = FindExtractedPandoc(extractPath);
             Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
 
-            progress?.Report("Installing Pandoc...");
+            progress?.Report("Installing Pandoc beside MDViewer.exe...");
             File.Copy(downloadedPandoc, targetPath, overwrite: true);
 
             progress?.Report($"Pandoc {asset.Version} installed.");
@@ -192,7 +192,7 @@ public sealed class PandocDownloadService
             return candidate;
         }
 
-        throw new IOException("No writable Pandoc installation folder was found.");
+        throw new IOException("The folder containing MDViewer.exe is not writable. Move MDViewer.exe to a writable folder, place pandoc.exe beside it manually, or install Pandoc on PATH.");
     }
 
     private static bool CanWriteToDirectory(string directory)

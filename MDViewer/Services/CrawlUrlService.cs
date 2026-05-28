@@ -1997,7 +1997,7 @@ internal static class Pandoc
 
         if (found is null)
         {
-            throw new FileNotFoundException("pandoc was not found in the app Assets folder, the MDViewer local app data folder, or on PATH. Use Fetch Pandoc to download it.");
+            throw new FileNotFoundException("pandoc was not found beside the app, in the app Assets folder, or on PATH. Use Fetch Pandoc to download it beside MDViewer.exe.");
         }
 
         using var process = Process.Start(new ProcessStartInfo
@@ -2027,57 +2027,73 @@ internal static class Pandoc
 
     public static IEnumerable<string> GetPandocInstallCandidates()
     {
-        foreach (string bundled in GetBundledPandocCandidates())
-        {
-            yield return bundled;
-        }
-
-        yield return GetUserPandocPath();
+        return GetExecutableAdjacentPandocCandidates(includeCurrentDirectory: false);
     }
 
     private static IEnumerable<string> GetPandocFileCandidates()
     {
-        foreach (string candidate in GetPandocInstallCandidates())
+        foreach (string candidate in GetExecutableAdjacentPandocCandidates(includeCurrentDirectory: false))
+        {
+            yield return candidate;
+        }
+
+        foreach (string candidate in GetAssetPandocCandidates(includeCurrentDirectory: true))
         {
             yield return candidate;
         }
     }
 
-    private static IEnumerable<string> GetBundledPandocCandidates()
+    private static IEnumerable<string> GetExecutableAdjacentPandocCandidates(bool includeCurrentDirectory)
     {
         string fileName = OperatingSystem.IsWindows() ? "pandoc.exe" : "pandoc";
+
+        foreach (string baseDirectory in GetAppBaseDirectories(includeCurrentDirectory))
+        {
+            yield return Path.GetFullPath(Path.Combine(baseDirectory, fileName));
+        }
+    }
+
+    private static IEnumerable<string> GetAssetPandocCandidates(bool includeCurrentDirectory)
+    {
+        string fileName = OperatingSystem.IsWindows() ? "pandoc.exe" : "pandoc";
+
+        foreach (string baseDirectory in GetAppBaseDirectories(includeCurrentDirectory))
+        {
+            yield return Path.GetFullPath(Path.Combine(baseDirectory, "Assets", fileName));
+        }
+    }
+
+    private static IEnumerable<string> GetAppBaseDirectories(bool includeCurrentDirectory)
+    {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (string? baseDirectory in new[]
-        {
-            AppContext.BaseDirectory,
-            Path.GetDirectoryName(Environment.ProcessPath),
-            Directory.GetCurrentDirectory()
-        })
+        string?[] baseDirectories = includeCurrentDirectory
+            ?
+            [
+                AppContext.BaseDirectory,
+                Path.GetDirectoryName(Environment.ProcessPath),
+                Directory.GetCurrentDirectory()
+            ]
+            :
+            [
+                AppContext.BaseDirectory,
+                Path.GetDirectoryName(Environment.ProcessPath)
+            ];
+
+        foreach (string? baseDirectory in baseDirectories)
         {
             if (string.IsNullOrWhiteSpace(baseDirectory))
             {
                 continue;
             }
 
-            string candidate = Path.GetFullPath(Path.Combine(baseDirectory, "Assets", fileName));
+            string fullPath = Path.GetFullPath(baseDirectory);
 
-            if (seen.Add(candidate))
+            if (seen.Add(fullPath))
             {
-                yield return candidate;
+                yield return fullPath;
             }
         }
-    }
-
-    private static string GetUserPandocPath()
-    {
-        string fileName = OperatingSystem.IsWindows() ? "pandoc.exe" : "pandoc";
-
-        return Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "MDViewer",
-            "Pandoc",
-            fileName);
     }
 
     public static async Task<string> ConvertHtmlToMarkdownAsync(

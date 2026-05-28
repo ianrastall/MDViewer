@@ -6,6 +6,7 @@ using Microsoft.UI.Dispatching;
 using Microsoft.UI.Windowing;
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using WinRT.Interop;
@@ -46,6 +47,42 @@ public partial class App : Application
         
         // Ensure the current window is active
         MainWindow.Activate();
+
+        if (rootFrame.Content is MainPage mainPage &&
+            TryGetLaunchFilePath(args.Arguments, out string? launchFilePath) &&
+            launchFilePath is not null)
+        {
+            _ = mainPage.OpenExternalFileAsync(launchFilePath);
+        }
+    }
+
+    private static bool TryGetLaunchFilePath(string launchArguments, out string? filePath)
+    {
+        filePath = Environment.GetCommandLineArgs()
+            .Skip(1)
+            .FirstOrDefault(File.Exists)
+            ?? ParseSingleLaunchArgument(launchArguments);
+
+        return !string.IsNullOrWhiteSpace(filePath) && File.Exists(filePath);
+    }
+
+    private static string? ParseSingleLaunchArgument(string launchArguments)
+    {
+        string trimmed = launchArguments.Trim();
+
+        if (trimmed.Length == 0)
+        {
+            return null;
+        }
+
+        if (trimmed.Length >= 2 &&
+            trimmed[0] == '"' &&
+            trimmed[^1] == '"')
+        {
+            trimmed = trimmed[1..^1];
+        }
+
+        return File.Exists(trimmed) ? trimmed : null;
     }
 
     private static void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)

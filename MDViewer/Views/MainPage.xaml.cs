@@ -349,6 +349,18 @@ public sealed partial class MainPage : Page
         return file?.Path;
     }
 
+    public async Task OpenExternalFileAsync(string filePath)
+    {
+        try
+        {
+            await ViewModel.LoadFileAsync(filePath);
+        }
+        catch (Exception ex)
+        {
+            ViewModel.ReportOpenFailure(ex);
+        }
+    }
+
     private async Task<string?> PickMarkdownSaveFilePathAsync()
     {
         var picker = new FileSavePicker
