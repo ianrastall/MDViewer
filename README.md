@@ -2,6 +2,8 @@
 
 MDViewer is a Windows Markdown viewer and conversion tool built with WinUI 3. It opens Markdown files directly, renders a readable preview, builds a heading outline for navigation, and uses Pandoc when you need to import, export, or crawl content into Markdown.
 
+<img width="1920" height="1031" alt="screenshot-1" src="https://github.com/user-attachments/assets/ab6aad69-eb4e-4514-9168-37baa1084bcc" />
+
 ## Features
 
 - Open `.md` and `.txt` files directly.
