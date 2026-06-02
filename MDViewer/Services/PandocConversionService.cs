@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 using System.Threading.Tasks;
 
 namespace MDViewer.Services;
@@ -21,16 +22,11 @@ public sealed class PandocConversionException : InvalidOperationException
 
 public class PandocConversionService
 {
-    private readonly MarkdownFormatterService _markdownFormatterService;
+    private const string MetadataSafeMarkdownReaderFormat = "markdown-yaml_metadata_block";
+    private static readonly Encoding PandocEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
     public PandocConversionService()
-        : this(new MarkdownFormatterService())
     {
-    }
-
-    public PandocConversionService(MarkdownFormatterService markdownFormatterService)
-    {
-        _markdownFormatterService = markdownFormatterService ?? throw new ArgumentNullException(nameof(markdownFormatterService));
     }
 
     public async Task<string> ImportAsMarkdownAsync(string inputFilePath)
@@ -41,12 +37,28 @@ public class PandocConversionService
         startInfo.ArgumentList.Add("-s");
         startInfo.ArgumentList.Add(inputFilePath);
         startInfo.ArgumentList.Add("-t");
-        startInfo.ArgumentList.Add("markdown");
-        startInfo.ArgumentList.Add("--markdown-headings=atx");
-        startInfo.ArgumentList.Add("--wrap=none");
+        startInfo.ArgumentList.Add(Pandoc.MarkdownFormat);
+        Pandoc.AddMarkdownWriterOptions(startInfo);
 
         PandocProcessResult result = await RunPandocAsync(startInfo);
-        return _markdownFormatterService.FormatAndLint(result.StandardOutput);
+        return result.StandardOutput;
+    }
+
+    public async Task<string> FormatMarkdownAsync(string rawMarkdown)
+    {
+        ArgumentNullException.ThrowIfNull(rawMarkdown);
+
+        MarkdownTextParts parts = SplitOpeningMetadataBlock(rawMarkdown);
+        ProcessStartInfo startInfo = CreatePandocStartInfo(Pandoc.FindPandocOrThrow());
+        startInfo.RedirectStandardInput = true;
+        startInfo.ArgumentList.Add("-f");
+        startInfo.ArgumentList.Add(MetadataSafeMarkdownReaderFormat);
+        startInfo.ArgumentList.Add("-t");
+        startInfo.ArgumentList.Add(Pandoc.MarkdownFormat);
+        Pandoc.AddMarkdownWriterOptions(startInfo);
+
+        PandocProcessResult result = await RunPandocAsync(startInfo, parts.Body);
+        return ReattachOpeningMetadataBlock(parts.MetadataBlock, result.StandardOutput);
     }
 
     public async Task ExportFromMarkdownAsync(string rawMarkdown, string targetFilePath, string targetExtension)
@@ -68,7 +80,7 @@ public class PandocConversionService
         startInfo.RedirectStandardInput = true;
         startInfo.ArgumentList.Add("-s");
         startInfo.ArgumentList.Add("-f");
-        startInfo.ArgumentList.Add("markdown");
+        startInfo.ArgumentList.Add(Pandoc.MarkdownFormat);
         startInfo.ArgumentList.Add("-t");
         startInfo.ArgumentList.Add(outputFormat);
         startInfo.ArgumentList.Add("-o");
@@ -89,6 +101,8 @@ public class PandocConversionService
             FileName = pandocPath,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            StandardOutputEncoding = PandocEncoding,
+            StandardErrorEncoding = PandocEncoding,
             UseShellExecute = false,
             CreateNoWindow = true
         };
@@ -96,6 +110,12 @@ public class PandocConversionService
 
     private async Task<PandocProcessResult> RunPandocAsync(ProcessStartInfo startInfo, string? standardInput = null)
     {
+        if (standardInput is not null)
+        {
+            startInfo.RedirectStandardInput = true;
+            startInfo.StandardInputEncoding = PandocEncoding;
+        }
+
         using Process process = new() { StartInfo = startInfo };
 
         if (!process.Start())
@@ -134,6 +154,75 @@ public class PandocConversionService
         }
     }
 
+    private static MarkdownTextParts SplitOpeningMetadataBlock(string markdown)
+    {
+        string normalized = markdown.Replace("\r\n", "\n").Replace('\r', '\n');
+
+        if (!normalized.StartsWith("---\n", StringComparison.Ordinal))
+        {
+            return new MarkdownTextParts(null, markdown);
+        }
+
+        int firstLineEnd = "---\n".Length;
+
+        if (firstLineEnd >= normalized.Length || normalized[firstLineEnd] is '\n' or '\r')
+        {
+            return new MarkdownTextParts(null, markdown);
+        }
+
+        foreach (var (line, lineEnd) in EnumerateNormalizedLines(normalized[firstLineEnd..], firstLineEnd))
+        {
+            string trimmed = line.Trim();
+
+            if (trimmed is not ("---" or "..."))
+            {
+                continue;
+            }
+
+            string metadataBlock = normalized[..lineEnd].TrimEnd();
+            string body = normalized[lineEnd..].TrimStart('\n');
+            return new MarkdownTextParts(metadataBlock, body);
+        }
+
+        return new MarkdownTextParts(null, markdown);
+    }
+
+    private static IEnumerable<(string Line, int LineEnd)> EnumerateNormalizedLines(string text, int startOffset)
+    {
+        int lineStart = 0;
+
+        for (int i = 0; i < text.Length; i++)
+        {
+            if (text[i] != '\n')
+            {
+                continue;
+            }
+
+            yield return (text[lineStart..i], startOffset + i + 1);
+            lineStart = i + 1;
+        }
+
+        if (lineStart < text.Length)
+        {
+            yield return (text[lineStart..], startOffset + text.Length);
+        }
+    }
+
+    private static string ReattachOpeningMetadataBlock(string? metadataBlock, string body)
+    {
+        if (string.IsNullOrWhiteSpace(metadataBlock))
+        {
+            return body;
+        }
+
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return metadataBlock + Environment.NewLine;
+        }
+
+        return metadataBlock + Environment.NewLine + Environment.NewLine + body.TrimStart();
+    }
+
     private static string GetPandocOutputFormat(string targetExtension)
     {
         string normalizedExtension = targetExtension.StartsWith('.')
@@ -156,4 +245,6 @@ public class PandocConversionService
     }
 
     private sealed record PandocProcessResult(string StandardOutput, string StandardError);
+
+    private sealed record MarkdownTextParts(string? MetadataBlock, string Body);
 }

@@ -100,6 +100,11 @@ public partial class App : Application
         LogCrash("Unobserved task exception", e.Exception);
     }
 
+    public static void LogHandledException(string category, Exception exception)
+    {
+        WriteLog("app.log", category, exception.ToString());
+    }
+
     private static void SetWindowIcon(Window window)
     {
         string iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico");
@@ -132,6 +137,12 @@ public partial class App : Application
 
     private static void LogCrash(string category, Exception? exception)
     {
+        string details = exception?.ToString() ?? "(no managed exception object)";
+        WriteLog("crash.log", category, details);
+    }
+
+    private static void WriteLog(string fileName, string category, string details)
+    {
         try
         {
             string directory = Path.Combine(
@@ -140,8 +151,7 @@ public partial class App : Application
 
             Directory.CreateDirectory(directory);
 
-            string logPath = Path.Combine(directory, "crash.log");
-            string details = exception?.ToString() ?? "(no managed exception object)";
+            string logPath = Path.Combine(directory, fileName);
 
             File.AppendAllText(
                 logPath,

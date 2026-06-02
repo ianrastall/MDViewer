@@ -128,9 +128,9 @@ public partial class MainViewModel : ObservableObject
     public MainViewModel()
     {
         _markdownFormatterService = new MarkdownFormatterService();
-        _pandocService = new PandocConversionService(_markdownFormatterService);
+        _pandocService = new PandocConversionService();
         _pandocDownloadService = new PandocDownloadService();
-        _crawlUrlService = new CrawlUrlService(_markdownFormatterService);
+        _crawlUrlService = new CrawlUrlService();
         _currentDocument = new DocumentContext
         {
             Origin = DocumentOrigin.NativeMarkdown,
@@ -231,13 +231,13 @@ public partial class MainViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private void Format()
+    private async Task FormatAsync()
     {
         try
         {
-            string markdown = _markdownFormatterService.FormatAndLint(CurrentDocument.RawMarkdown);
+            string markdown = await _pandocService.FormatMarkdownAsync(CurrentDocument.RawMarkdown);
             SetCurrentMarkdown(markdown, preserveViewMode: true);
-            DocumentStatus = "Formatted Markdown.";
+            DocumentStatus = "Formatted as Pandoc Markdown.";
         }
         catch (Exception ex)
         {
@@ -481,6 +481,7 @@ public partial class MainViewModel : ObservableObject
 
     private void SetCommandFailureStatus(string action, Exception exception)
     {
+        global::MDViewer.App.LogHandledException($"{action} failed", exception);
         DocumentStatus = $"{action} failed: {exception.Message}";
     }
 

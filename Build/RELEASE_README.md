@@ -9,7 +9,7 @@ This release ships `MDViewer.exe`, a self-contained Windows x64 build of MDViewe
 - Builds a heading outline from the current document so you can jump through long files.
 - Shows document stats for line count, character count, UTF-8 encoding, and zoom level.
 - Saves Markdown back to `.md` or `.txt`.
-- Formats Markdown using Markdig, including stable block spacing, ATX headings, and normalized list markers.
+- Formats Markdown through Pandoc using Pandoc Markdown, ATX headings, and no hard wrapping.
 - Reflows heading levels into a cleaner hierarchy and warns when manual tables of contents or anchor links may need review.
 - Imports `.docx`, `.html`, and `.epub` into Markdown through Pandoc.
 - Exports Markdown through Pandoc to `.docx`, `.html`, `.epub`, `.rtf`, `.odt`, `.tex`, `.typ`, `.rst`, and `.org`.
@@ -20,11 +20,11 @@ This release ships `MDViewer.exe`, a self-contained Windows x64 build of MDViewe
 
 - Windows x64.
 - Windows 10 version 1809 or newer.
-- Pandoc is only required for import, export, and crawl features. Native Markdown viewing, raw view, formatting, reflow, save, zoom, and heading navigation work without Pandoc.
+- Pandoc is only required for import, export, formatting, and crawl features. Native Markdown viewing, raw view, reflow, save, zoom, and heading navigation work without Pandoc.
 
 ## Pandoc Setup
 
-For conversion and crawling, use one of these options:
+For conversion, formatting, and crawling, use one of these options:
 
 - Click `Fetch Pandoc` inside MDViewer. The app downloads the latest Windows x64 Pandoc release and places `pandoc.exe` beside `MDViewer.exe`.
 - Place `pandoc.exe` beside `MDViewer.exe` yourself.

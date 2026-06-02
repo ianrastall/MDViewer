@@ -10,7 +10,7 @@ MDViewer is a Windows Markdown viewer and conversion tool built with WinUI 3. It
 - Navigate long documents with an automatically generated heading tree.
 - View line count, character count, UTF-8 encoding, and zoom level.
 - Save Markdown as `.md` or `.txt`.
-- Format Markdown with normalized spacing, ATX headings, and stable list markers.
+- Format Markdown through Pandoc using Pandoc Markdown, ATX headings, and no hard wrapping.
 - Reflow heading levels into a cleaner hierarchy.
 - Import `.docx`, `.html`, and `.epub` into Markdown through Pandoc.
 - Export Markdown through Pandoc to `.docx`, `.html`, `.epub`, `.rtf`, `.odt`, `.tex`, `.typ`, `.rst`, and `.org`.
@@ -26,7 +26,7 @@ Because the executable is unsigned, Windows SmartScreen may show an unknown-publ
 
 ## Pandoc
 
-Pandoc is optional for basic Markdown viewing. You only need Pandoc for import, export, and crawl features.
+Pandoc is optional for basic Markdown viewing. You need Pandoc for import, export, formatting, and crawl features.
 
 MDViewer looks for Pandoc in this order:
 

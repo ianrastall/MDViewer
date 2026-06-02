@@ -30,17 +30,6 @@ public sealed class CrawlerOptions
 public sealed class CrawlUrlService
 {
     private const string UserAgent = "MDViewer/1.0 (single-threaded; personal docs archival)";
-    private readonly MarkdownFormatterService _markdownFormatterService;
-
-    public CrawlUrlService()
-        : this(new MarkdownFormatterService())
-    {
-    }
-
-    public CrawlUrlService(MarkdownFormatterService markdownFormatterService)
-    {
-        _markdownFormatterService = markdownFormatterService ?? throw new ArgumentNullException(nameof(markdownFormatterService));
-    }
 
     public async Task<string> CrawlAsync(Uri startUrl, CrawlerOptions options, IProgress<string> progress, CancellationToken cancellationToken)
     {
@@ -62,7 +51,7 @@ public sealed class CrawlUrlService
 
         progress.Report($"Rendering {result.Pages.Count} pages");
         string collatedMarkdown = MarkdownRenderer.Render(startUrl, result, UserAgent, options);
-        return _markdownFormatterService.FormatAndLint(collatedMarkdown);
+        return collatedMarkdown.Trim();
     }
 }
 
@@ -1977,6 +1966,14 @@ internal sealed class RobotsTxt
 
 internal static class Pandoc
 {
+    public const string MarkdownFormat = "markdown";
+
+    public static void AddMarkdownWriterOptions(ProcessStartInfo startInfo)
+    {
+        startInfo.ArgumentList.Add("--wrap=none");
+        startInfo.ArgumentList.Add("--markdown-headings=atx");
+    }
+
     public static string FindPandocOrThrow()
     {
         foreach (string bundled in GetPandocFileCandidates())
@@ -2151,9 +2148,8 @@ internal static class Pandoc
         process.StartInfo.ArgumentList.Add("--from");
         process.StartInfo.ArgumentList.Add(fromFormat);
         process.StartInfo.ArgumentList.Add("--to");
-        process.StartInfo.ArgumentList.Add("gfm");
-        process.StartInfo.ArgumentList.Add("--wrap=none");
-        process.StartInfo.ArgumentList.Add("--markdown-headings=atx");
+        process.StartInfo.ArgumentList.Add(MarkdownFormat);
+        AddMarkdownWriterOptions(process.StartInfo);
         process.StartInfo.ArgumentList.Add("--strip-comments");
 
         if (!process.Start())
