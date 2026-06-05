@@ -78,6 +78,7 @@ public partial class MainViewModel : ObservableObject
     private readonly MarkdownFormatterService _markdownFormatterService;
     private readonly PandocConversionService _pandocService;
     private readonly PandocDownloadService _pandocDownloadService;
+    private readonly PdfImportService _pdfImportService;
     private readonly CrawlUrlService _crawlUrlService;
     private Func<Task<string?>> _pickOpenFileAsync = static () => Task.FromResult<string?>(null);
     private Func<Task<string?>> _pickMarkdownSaveFileAsync = static () => Task.FromResult<string?>(null);
@@ -130,6 +131,7 @@ public partial class MainViewModel : ObservableObject
         _markdownFormatterService = new MarkdownFormatterService();
         _pandocService = new PandocConversionService();
         _pandocDownloadService = new PandocDownloadService();
+        _pdfImportService = new PdfImportService();
         _crawlUrlService = new CrawlUrlService();
         _currentDocument = new DocumentContext
         {
@@ -430,6 +432,22 @@ public partial class MainViewModel : ObservableObject
             return;
         }
 
+        if (extension == ".pdf")
+        {
+            var progress = new Progress<string>(status => DocumentStatus = status);
+            PdfImportResult result = await _pdfImportService.ImportAsMarkdownAsync(filePath, progress);
+
+            SetCurrentDocument(new DocumentContext
+            {
+                SourceFilePath = filePath,
+                Origin = DocumentOrigin.ImportedForeign,
+                RawMarkdown = result.Markdown
+            });
+
+            DocumentStatus = BuildPdfImportStatus(Path.GetFileName(filePath), result);
+            return;
+        }
+
         throw new NotSupportedException($"Unsupported file type: {extension}");
     }
 
@@ -477,6 +495,27 @@ public partial class MainViewModel : ObservableObject
         return warnings.Count == 1
             ? $"{summary} {warnings[0]}"
             : $"{summary} {warnings[0]} (+{warnings.Count - 1} more)";
+    }
+
+    private static string BuildPdfImportStatus(string fileName, PdfImportResult result)
+    {
+        var parts = new List<string> { $"Imported {fileName}" };
+
+        if (result.OcrPageCount > 0)
+        {
+            parts.Add($"OCR on {result.OcrPageCount:N0} page(s)");
+        }
+
+        if (result.MissingPageCount > 0)
+        {
+            parts.Add($"{result.MissingPageCount:N0} unreadable page(s)");
+        }
+        else if (result.Warnings.Count > 0)
+        {
+            parts.Add($"{result.Warnings.Count:N0} warning(s)");
+        }
+
+        return string.Join("; ", parts) + ".";
     }
 
     private void SetCommandFailureStatus(string action, Exception exception)

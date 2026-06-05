@@ -12,6 +12,7 @@ This release ships `MDViewer.exe`, a self-contained Windows x64 build of MDViewe
 - Formats Markdown through Pandoc using Pandoc Markdown, ATX headings, and no hard wrapping.
 - Reflows heading levels into a cleaner hierarchy and warns when manual tables of contents or anchor links may need review.
 - Imports `.docx`, `.html`, and `.epub` into Markdown through Pandoc.
+- Imports `.pdf` with native C# text extraction and Windows OCR fallback for image-only pages.
 - Exports Markdown through Pandoc to `.docx`, `.html`, `.epub`, `.rtf`, `.odt`, `.tex`, `.typ`, `.rst`, and `.org`.
 - Crawls documentation sites into Markdown with a polite single-threaded crawler that respects `robots.txt`, keeps to the same base path, and caps crawls at 250 pages.
 - Includes a `Fetch Pandoc` command that downloads the latest Windows x64 Pandoc build when conversion or crawling features need it, without changing the user's `PATH`.
@@ -34,6 +35,10 @@ For conversion, formatting, and crawling, use one of these options:
 MDViewer checks for Pandoc in this order: `pandoc.exe` beside `MDViewer.exe`, app-local `Assets\pandoc.exe`, then `PATH`. `Fetch Pandoc` does not modify user or machine environment variables.
 
 `Fetch Pandoc` needs the folder containing `MDViewer.exe` to be writable. If the app is in a protected folder, move it to a user-writable folder or install Pandoc on `PATH`.
+
+## PDF Import
+
+PDF import is built in and does not require Python, Marker, or model downloads. MDViewer extracts embedded PDF text first, then uses Windows OCR for pages that appear to be image-only. Complex tables and multi-column layouts may still need review after import.
 
 ## Running The App
 

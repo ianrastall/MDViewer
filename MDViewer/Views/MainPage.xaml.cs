@@ -342,6 +342,7 @@ public sealed partial class MainPage : Page
         picker.FileTypeFilter.Add(".docx");
         picker.FileTypeFilter.Add(".html");
         picker.FileTypeFilter.Add(".epub");
+        picker.FileTypeFilter.Add(".pdf");
 
         InitializePickerWithMainWindow(picker);
 
