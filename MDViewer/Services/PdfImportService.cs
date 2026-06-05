@@ -37,8 +37,15 @@ public sealed record PdfImportResult(
     IReadOnlyList<int> MissingPages,
     IReadOnlyList<string> Warnings);
 
+public enum PdfMarkdownNormalizationMode
+{
+    PreserveLines,
+    FlowingProse
+}
+
 public sealed class PdfImportService
 {
+    private const string LineEnding = "\n";
     private const double OcrTargetScale = 3.0;
     private const double MinimumOcrScale = 0.05;
     private const int ReadableLetterThreshold = 10;
@@ -55,9 +62,10 @@ public sealed class PdfImportService
     private static readonly Regex WordRegex = new(@"\p{L}{2,}", RegexOptions.Compiled);
     private static readonly Regex RepeatedWhitespaceRegex = new(@"[ \t]{3,}", RegexOptions.Compiled);
     private static readonly Regex LeadingIndentRegex = new(@"^\s{2,}", RegexOptions.Compiled);
+    private static readonly Regex MarkdownTitleEscapeRegex = new(@"[#*_`\[\]<>\\]", RegexOptions.Compiled);
 
     private static readonly Regex BulletRegex = new(
-        @"^\s*(?<bullet>[*+\-•‣◦▪–—]|\d+[.)])\s+(?<text>.+)$",
+        @"^\s*(?<bullet>[*+\-\u2022\u2023\u25E6\u25AA\u2013\u2014]|\d+[.)])\s+(?<text>.+)$",
         RegexOptions.Compiled);
 
     private static readonly Regex NumberedBulletRegex = new(@"^\d+[.)]$", RegexOptions.Compiled);
@@ -66,7 +74,8 @@ public sealed class PdfImportService
         string pdfPath,
         IProgress<string>? progress = null,
         CancellationToken cancellationToken = default,
-        string? ocrLanguageTag = null)
+        string? ocrLanguageTag = null,
+        PdfMarkdownNormalizationMode normalizationMode = PdfMarkdownNormalizationMode.PreserveLines)
     {
         if (string.IsNullOrWhiteSpace(pdfPath))
         {
@@ -80,7 +89,12 @@ public sealed class PdfImportService
 
         try
         {
-            return await ImportAsMarkdownCoreAsync(pdfPath, progress, cancellationToken, ocrLanguageTag).ConfigureAwait(false);
+            return await ImportAsMarkdownCoreAsync(
+                pdfPath,
+                progress,
+                cancellationToken,
+                ocrLanguageTag,
+                normalizationMode).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -102,7 +116,8 @@ public sealed class PdfImportService
         string pdfPath,
         IProgress<string>? progress,
         CancellationToken cancellationToken,
-        string? ocrLanguageTag)
+        string? ocrLanguageTag,
+        PdfMarkdownNormalizationMode normalizationMode)
     {
         progress?.Report("Reading PDF text...");
 
@@ -145,11 +160,19 @@ public sealed class PdfImportService
             warnings.Add($"No readable text was extracted from page(s): {string.Join(", ", missingPages)}.");
         }
 
-        string markdown = await Task
-            .Run(() => BuildMarkdown(pdfPath, pages), cancellationToken)
-            .ConfigureAwait(false);
-
         int embeddedTextPageCount = pages.Count(static page => !page.IsOcr && HasReadableText(page.Text));
+        string markdown = await Task
+            .Run(
+                () => BuildMarkdown(
+                    pdfPath,
+                    pages,
+                    embeddedTextPageCount,
+                    ocrPages,
+                    missingPages,
+                    warnings,
+                    normalizationMode),
+                cancellationToken)
+            .ConfigureAwait(false);
 
         return new PdfImportResult(
             markdown,
@@ -236,14 +259,15 @@ public sealed class PdfImportService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            PdfPageText pageText = pages[pageIndex];
+            int arrayIndex = checked((int)pageIndex);
+            PdfPageText pageText = pages[arrayIndex];
 
             if (!ShouldRunOcr(pageText))
             {
                 continue;
             }
 
-            int pageNumber = (int)pageIndex + 1;
+            int pageNumber = arrayIndex + 1;
             progress?.Report($"Running OCR on page {pageNumber:N0} of {pageCount:N0}...");
 
             try
@@ -256,8 +280,15 @@ public sealed class PdfImportService
                     continue;
                 }
 
-                pages[pageIndex] = pageText with { Text = ocrText, IsOcr = true };
-                ocrPages.Add(pageNumber);
+                if (ShouldUseOcrText(pageText.Text, ocrText))
+                {
+                    pages[arrayIndex] = pageText with { Text = ocrText, IsOcr = true };
+                    ocrPages.Add(pageNumber);
+                }
+                else if (HasReadableText(ocrText))
+                {
+                    warnings.Add($"OCR on page {pageNumber:N0} was not used because embedded text looked better.");
+                }
             }
             catch (OperationCanceledException)
             {
@@ -320,6 +351,11 @@ public sealed class PdfImportService
             .CreateAsync(stream)
             .AsTask(cancellationToken)
             .ConfigureAwait(false);
+
+        if (decoder is null)
+        {
+            return string.Empty;
+        }
 
         using SoftwareBitmap bitmap = await decoder
             .GetSoftwareBitmapAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied)
@@ -384,19 +420,24 @@ public sealed class PdfImportService
         };
     }
 
-    private static string BuildMarkdown(string pdfPath, PdfPageText[] pages)
+    private static string BuildMarkdown(
+        string pdfPath,
+        PdfPageText[] pages,
+        int embeddedTextPageCount,
+        IReadOnlyList<int> ocrPages,
+        IReadOnlyList<int> missingPages,
+        IReadOnlyList<string> warnings,
+        PdfMarkdownNormalizationMode normalizationMode)
     {
         var markdown = new StringBuilder();
-        string title = Path.GetFileNameWithoutExtension(pdfPath);
+        string title = SanitizeMarkdownTitle(Path.GetFileNameWithoutExtension(pdfPath));
 
-        if (string.IsNullOrWhiteSpace(title))
-        {
-            title = "Untitled";
-        }
+        AppendDiagnosticsComment(markdown, pages.Length, embeddedTextPageCount, ocrPages, missingPages, warnings);
 
         markdown.Append("# ");
-        markdown.AppendLine(title);
-        markdown.AppendLine();
+        markdown.Append(title);
+        markdown.Append(LineEnding);
+        markdown.Append(LineEnding);
 
         foreach (PdfPageText page in pages)
         {
@@ -405,30 +446,58 @@ public sealed class PdfImportService
                 continue;
             }
 
-            string pageMarkdown = NormalizePageText(page.Text);
+            string pageMarkdown = NormalizePageText(page.Text, normalizationMode);
 
             if (string.IsNullOrWhiteSpace(pageMarkdown))
             {
                 continue;
             }
 
-            markdown.AppendLine($"<!-- Page {page.Number} -->");
-            markdown.AppendLine();
-            markdown.AppendLine(pageMarkdown);
-            markdown.AppendLine();
+            markdown.Append("<!-- Page ");
+            markdown.Append(page.Number);
+            markdown.Append(" -->");
+            markdown.Append(LineEnding);
+            markdown.Append(LineEnding);
+            markdown.Append(pageMarkdown);
+            markdown.Append(LineEnding);
+            markdown.Append(LineEnding);
         }
 
-        return markdown.ToString().TrimEnd() + Environment.NewLine;
+        return NormalizeLineEndings(markdown.ToString()).TrimEnd() + LineEnding;
     }
 
-    private static string NormalizePageText(string text)
+    private static string NormalizePageText(string text, PdfMarkdownNormalizationMode normalizationMode)
+    {
+        return normalizationMode == PdfMarkdownNormalizationMode.PreserveLines
+            ? NormalizePageTextPreserveLines(text)
+            : NormalizePageTextFlowingProse(text);
+    }
+
+    private static string NormalizePageTextPreserveLines(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
         {
             return string.Empty;
         }
 
-        string normalized = text.Replace("\r\n", "\n").Replace('\r', '\n');
+        string normalized = NormalizeLineEndings(text);
+        normalized = HyphenatedLineBreakRegex.Replace(normalized, "${prefix}${suffix}");
+
+        var lines = normalized
+            .Split('\n')
+            .Select(NormalizePreservedLine);
+
+        return ExcessBlankLineRegex.Replace(string.Join(LineEnding, lines).Trim(), "\n\n");
+    }
+
+    private static string NormalizePageTextFlowingProse(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return string.Empty;
+        }
+
+        string normalized = NormalizeLineEndings(text);
         normalized = HyphenatedLineBreakRegex.Replace(normalized, "${prefix}${suffix}");
 
         string[] lines = normalized.Split('\n');
@@ -458,7 +527,8 @@ public sealed class PdfImportService
             if (ShouldPreserveLineBreak(rawLine))
             {
                 FlushParagraph(markdown, paragraph);
-                markdown.AppendLine(NormalizePreservedLine(rawLine));
+                markdown.Append(NormalizePreservedLine(rawLine));
+                markdown.Append(LineEnding);
                 continue;
             }
 
@@ -477,34 +547,78 @@ public sealed class PdfImportService
 
     private static bool HasReadableText(string? text)
     {
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return false;
-        }
-
-        int letters = text.Count(char.IsLetter);
-
-        if (letters >= ReadableLetterThreshold)
-        {
-            return true;
-        }
-
-        return WordRegex.Matches(text).Count >= ReadableWordThreshold;
+        return TextQualityScore(text) >= ReadableLetterThreshold ||
+            CountWords(text) >= ReadableWordThreshold;
     }
 
     private static bool ShouldRunOcr(PdfPageText page)
     {
-        string text = page.Text;
+        return LooksLikeBadTextLayer(page.Text);
+    }
 
+    private static bool LooksLikeBadTextLayer(string? text)
+    {
         if (string.IsNullOrWhiteSpace(text))
         {
             return true;
         }
 
+        int chars = text.Length;
         int letters = text.Count(char.IsLetter);
         int words = WordRegex.Matches(text).Count;
+        int replacementChars = text.Count(static character => character == '\uFFFD');
+        int controlChars = text.Count(static character =>
+            char.IsControl(character) &&
+            character is not '\r' and not '\n' and not '\t');
 
-        return letters < OcrCandidateLetterThreshold || words < OcrCandidateWordThreshold;
+        double letterRatio = chars == 0 ? 0 : (double)letters / chars;
+
+        return
+            words < OcrCandidateWordThreshold ||
+            letters < OcrCandidateLetterThreshold ||
+            replacementChars > 0 ||
+            controlChars > 0 ||
+            letterRatio < 0.25;
+    }
+
+    private static bool ShouldUseOcrText(string embeddedText, string ocrText)
+    {
+        if (!HasReadableText(ocrText))
+        {
+            return false;
+        }
+
+        if (!HasReadableText(embeddedText))
+        {
+            return true;
+        }
+
+        int embeddedScore = TextQualityScore(embeddedText);
+        int ocrScore = TextQualityScore(ocrText);
+
+        return ocrScore > embeddedScore * 2 || ocrScore >= embeddedScore + 120;
+    }
+
+    private static int TextQualityScore(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return 0;
+        }
+
+        int letters = text.Count(char.IsLetter);
+        int words = WordRegex.Matches(text).Count;
+        int replacementChars = text.Count(static character => character == '\uFFFD');
+        int controlChars = text.Count(static character =>
+            char.IsControl(character) &&
+            character is not '\r' and not '\n' and not '\t');
+
+        return letters + words * 5 - replacementChars * 20 - controlChars * 10;
+    }
+
+    private static int CountWords(string? text)
+    {
+        return string.IsNullOrWhiteSpace(text) ? 0 : WordRegex.Matches(text).Count;
     }
 
     private static bool ShouldPreserveLineBreak(string rawLine)
@@ -535,16 +649,20 @@ public sealed class PdfImportService
 
         if (NumberedBulletRegex.IsMatch(bullet))
         {
+            string number = bullet.TrimEnd('.', ')');
+
             markdown.Append(indent);
-            markdown.Append(bullet.TrimEnd(')'));
-            markdown.Append(' ');
-            markdown.AppendLine(itemText);
+            markdown.Append(number);
+            markdown.Append(". ");
+            markdown.Append(itemText);
+            markdown.Append(LineEnding);
             return;
         }
 
         markdown.Append(indent);
         markdown.Append("- ");
-        markdown.AppendLine(itemText);
+        markdown.Append(itemText);
+        markdown.Append(LineEnding);
     }
 
     private static string GetMarkdownListIndent(string rawLine)
@@ -561,9 +679,62 @@ public sealed class PdfImportService
             return;
         }
 
-        markdown.AppendLine(paragraph.ToString());
-        markdown.AppendLine();
+        markdown.Append(paragraph);
+        markdown.Append(LineEnding);
+        markdown.Append(LineEnding);
         paragraph.Clear();
+    }
+
+    private static void AppendDiagnosticsComment(
+        StringBuilder markdown,
+        int pageCount,
+        int embeddedTextPageCount,
+        IReadOnlyList<int> ocrPages,
+        IReadOnlyList<int> missingPages,
+        IReadOnlyList<string> warnings)
+    {
+        markdown.Append("<!--");
+        markdown.Append(LineEnding);
+        markdown.Append("PDF import: ");
+        markdown.Append(pageCount);
+        markdown.Append(" page(s)");
+        markdown.Append(LineEnding);
+        markdown.Append("Embedded text pages: ");
+        markdown.Append(embeddedTextPageCount);
+        markdown.Append(LineEnding);
+        markdown.Append("OCR pages: ");
+        markdown.Append(ocrPages.Count == 0 ? "none" : string.Join(", ", ocrPages));
+        markdown.Append(LineEnding);
+        markdown.Append("Missing pages: ");
+        markdown.Append(missingPages.Count == 0 ? "none" : string.Join(", ", missingPages));
+        markdown.Append(LineEnding);
+
+        foreach (string warning in warnings)
+        {
+            markdown.Append("Warning: ");
+            markdown.Append(warning);
+            markdown.Append(LineEnding);
+        }
+
+        markdown.Append("-->");
+        markdown.Append(LineEnding);
+        markdown.Append(LineEnding);
+    }
+
+    private static string SanitizeMarkdownTitle(string? title)
+    {
+        if (string.IsNullOrWhiteSpace(title))
+        {
+            return "Untitled";
+        }
+
+        string sanitized = MarkdownTitleEscapeRegex.Replace(title, string.Empty).Trim();
+        return string.IsNullOrWhiteSpace(sanitized) ? "Untitled" : sanitized;
+    }
+
+    private static string NormalizeLineEndings(string text)
+    {
+        return text.Replace("\r\n", "\n").Replace('\r', '\n');
     }
 
     private sealed record PdfPageText(int Number, string Text, bool IsOcr);

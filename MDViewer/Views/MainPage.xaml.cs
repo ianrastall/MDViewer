@@ -76,14 +76,6 @@ public sealed partial class MainPage : Page
         RichMarkdownTextBlock.Width = availableWidth;
     }
 
-    private void HeadingTreeView_ItemInvoked(TreeView sender, TreeViewItemInvokedEventArgs args)
-    {
-        if (TryGetHeadingNode(args.InvokedItem, out HeadingNode? heading) && heading is not null)
-        {
-            NavigateToHeading(heading);
-        }
-    }
-
     private void HeadingTreeView_SelectionChanged(TreeView sender, TreeViewSelectionChangedEventArgs args)
     {
         if (TryGetHeadingNode(sender.SelectedItem, out HeadingNode? heading) && heading is not null)
@@ -114,15 +106,13 @@ public sealed partial class MainPage : Page
 
     private void NavigateRichTextToHeading(HeadingNode heading)
     {
-        RichMarkdownScrollViewer.UpdateLayout();
-
         if (TryFindRenderedHeading(heading, out FrameworkElement? target) && target is not null)
         {
             ScrollElementIntoView(target);
             return;
         }
 
-        int totalLines = Math.Max(1, CountLines(ViewModel.CurrentDocument.RawMarkdown));
+        int totalLines = Math.Max(1, ViewModel.LineCount);
         double position = (double)Math.Max(0, heading.LineNumber - 1) / totalLines;
         double targetOffset = position * RichMarkdownScrollViewer.ScrollableHeight;
 
@@ -158,14 +148,14 @@ public sealed partial class MainPage : Page
             ? headingSizedMatches
             : textMatches;
 
-        if (candidates.Count == 0)
+        if (candidates.Count == 0 || candidates.Count <= heading.RenderOccurrence)
         {
             target = null;
             return false;
         }
 
         candidates.Sort(CompareByVerticalPosition);
-        target = candidates[Math.Min(heading.RenderOccurrence, candidates.Count - 1)];
+        target = candidates[heading.RenderOccurrence];
         return true;
     }
 
@@ -309,26 +299,6 @@ public sealed partial class MainPage : Page
         return heading is not null;
     }
 
-    private static int CountLines(string text)
-    {
-        if (text.Length == 0)
-        {
-            return 1;
-        }
-
-        int count = 1;
-
-        foreach (char character in text)
-        {
-            if (character == '\n')
-            {
-                count++;
-            }
-        }
-
-        return count;
-    }
-
     private async Task<string?> PickOpenFilePathAsync()
     {
         var picker = new FileOpenPicker
@@ -341,13 +311,25 @@ public sealed partial class MainPage : Page
         picker.FileTypeFilter.Add(".txt");
         picker.FileTypeFilter.Add(".docx");
         picker.FileTypeFilter.Add(".html");
+        picker.FileTypeFilter.Add(".htm");
         picker.FileTypeFilter.Add(".epub");
         picker.FileTypeFilter.Add(".pdf");
 
         InitializePickerWithMainWindow(picker);
 
         Windows.Storage.StorageFile? file = await picker.PickSingleFileAsync();
-        return file?.Path;
+
+        if (file is null)
+        {
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(file.Path))
+        {
+            throw new InvalidOperationException("The selected file does not have a local filesystem path. Copy it locally and try again.");
+        }
+
+        return file.Path;
     }
 
     public async Task OpenExternalFileAsync(string filePath)

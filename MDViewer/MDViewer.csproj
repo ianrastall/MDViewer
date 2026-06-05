@@ -19,6 +19,13 @@
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="AngleSharp" Version="1.4.0" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.2" />
@@ -31,6 +38,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- App assets are copied for local builds. Release publishing is intentionally single-file;
+         bundled tool downloads such as pandoc.exe are handled separately by app services. -->
     <Content Include="..\Assets\**\*">
       <Link>Assets\%(RecursiveDir)%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

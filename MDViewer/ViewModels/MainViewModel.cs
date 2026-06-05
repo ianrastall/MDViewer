@@ -58,6 +58,10 @@ public partial class MainViewModel : ObservableObject
     private bool _isFetchingPandoc;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(FileImportCancelVisibility))]
+    private bool _isFileImporting;
+
+    [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(StatusMessage))]
     private string _crawlStatus = string.Empty;
 
@@ -86,6 +90,7 @@ public partial class MainViewModel : ObservableObject
     private Func<Task<string?>> _promptForUrlAsync = static () => Task.FromResult<string?>(null);
     private Action _exitApplication = static () => { };
     private CancellationTokenSource? _crawlCancellation;
+    private CancellationTokenSource? _fileImportCancellation;
 
     public bool CanRenderRichMarkdown => true;
 
@@ -98,6 +103,8 @@ public partial class MainViewModel : ObservableObject
     public Visibility RawViewVisibility => IsRawView ? Visibility.Visible : Visibility.Collapsed;
 
     public Visibility CrawlOverlayVisibility => IsCrawling ? Visibility.Visible : Visibility.Collapsed;
+
+    public Visibility FileImportCancelVisibility => IsFileImporting ? Visibility.Visible : Visibility.Collapsed;
 
     public bool CanFetchPandoc => !IsCrawling && !IsFetchingPandoc;
 
@@ -161,6 +168,12 @@ public partial class MainViewModel : ObservableObject
     {
         try
         {
+            if (IsFileImporting)
+            {
+                DocumentStatus = "A file import is already in progress.";
+                return;
+            }
+
             string? filePath = await _pickOpenFileAsync();
 
             if (string.IsNullOrWhiteSpace(filePath))
@@ -269,6 +282,8 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private void CloseDocument()
     {
+        _fileImportCancellation?.Cancel();
+
         SetCurrentDocument(new DocumentContext
         {
             SourceFilePath = null,
@@ -378,6 +393,13 @@ public partial class MainViewModel : ObservableObject
     }
 
     [RelayCommand]
+    private void CancelFileImport()
+    {
+        _fileImportCancellation?.Cancel();
+        DocumentStatus = "Cancelling import...";
+    }
+
+    [RelayCommand]
     private void ZoomIn()
     {
         ZoomPercent = Math.Min(MaximumZoomPercent, ZoomPercent + ZoomStepPercent);
@@ -417,7 +439,7 @@ public partial class MainViewModel : ObservableObject
             return;
         }
 
-        if (extension == ".docx" || extension == ".html" || extension == ".epub")
+        if (extension == ".docx" || extension == ".html" || extension == ".htm" || extension == ".epub")
         {
             string rawMarkdown = await _pandocService.ImportAsMarkdownAsync(filePath);
 
@@ -434,17 +456,38 @@ public partial class MainViewModel : ObservableObject
 
         if (extension == ".pdf")
         {
-            var progress = new Progress<string>(status => DocumentStatus = status);
-            PdfImportResult result = await _pdfImportService.ImportAsMarkdownAsync(filePath, progress);
+            _fileImportCancellation?.Dispose();
+            _fileImportCancellation = new CancellationTokenSource();
+            IsFileImporting = true;
 
-            SetCurrentDocument(new DocumentContext
+            try
             {
-                SourceFilePath = filePath,
-                Origin = DocumentOrigin.ImportedForeign,
-                RawMarkdown = result.Markdown
-            });
+                var progress = new Progress<string>(status => DocumentStatus = status);
+                PdfImportResult result = await _pdfImportService.ImportAsMarkdownAsync(
+                    filePath,
+                    progress,
+                    _fileImportCancellation.Token);
 
-            DocumentStatus = BuildPdfImportStatus(Path.GetFileName(filePath), result);
+                SetCurrentDocument(new DocumentContext
+                {
+                    SourceFilePath = filePath,
+                    Origin = DocumentOrigin.ImportedForeign,
+                    RawMarkdown = result.Markdown
+                });
+
+                DocumentStatus = BuildPdfImportStatus(Path.GetFileName(filePath), result);
+            }
+            catch (OperationCanceledException)
+            {
+                DocumentStatus = "PDF import cancelled.";
+            }
+            finally
+            {
+                IsFileImporting = false;
+                _fileImportCancellation?.Dispose();
+                _fileImportCancellation = null;
+            }
+
             return;
         }
 

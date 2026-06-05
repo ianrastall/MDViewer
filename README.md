@@ -14,7 +14,7 @@ MDViewer is a Windows Markdown viewer and conversion tool built with WinUI 3. It
 - Save Markdown as `.md` or `.txt`.
 - Format Markdown through Pandoc using Pandoc Markdown, ATX headings, and no hard wrapping.
 - Reflow heading levels into a cleaner hierarchy.
-- Import `.docx`, `.html`, and `.epub` into Markdown through Pandoc.
+- Import `.docx`, `.html`, `.htm`, and `.epub` into Markdown through Pandoc.
 - Import `.pdf` with native C# text extraction and Windows OCR fallback for image-only pages.
 - Export Markdown through Pandoc to `.docx`, `.html`, `.epub`, `.rtf`, `.odt`, `.tex`, `.typ`, `.rst`, and `.org`.
 - Crawl documentation sites into Markdown with a conservative single-threaded crawler that respects `robots.txt`.
@@ -43,7 +43,7 @@ If the folder containing `MDViewer.exe` is not writable, move the app to a writa
 
 ## PDF Import
 
-PDF import is built in and does not require Python, Marker, or model downloads. MDViewer extracts embedded PDF text first, then uses Windows OCR for pages that appear to be image-only. Complex tables and multi-column layouts may still need review after import.
+PDF import is built in and does not require Python, Marker, or model downloads. MDViewer extracts embedded PDF text first, then uses Windows OCR for pages with missing or weak text. Imported Markdown includes a hidden diagnostics comment with page, OCR, warning, and missing-page details.
 
 ## Building From Source
 

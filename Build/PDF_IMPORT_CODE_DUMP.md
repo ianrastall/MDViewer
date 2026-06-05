@@ -1,21 +1,21 @@
 # MDViewer PDF Import Code Dump
 
-- Generated: 2026-06-05 17:19:51 -05:00
+- Generated: 2026-06-05 17:39:51 -05:00
 - Repository: D:\GitHub\MDViewer
 - Branch: main
-- Commit: 6d16d5e
+- Commit: d588743
 
 ## Working Tree Status
 
 ```text
+ M Build/PDF_IMPORT_CODE_DUMP.md
  M Build/RELEASE_README.md
  M MDViewer/MDViewer.csproj
+ M MDViewer/Services/PdfImportService.cs
  M MDViewer/ViewModels/MainViewModel.cs
+ M MDViewer/Views/MainPage.xaml
  M MDViewer/Views/MainPage.xaml.cs
  M README.md
-?? Build/PDF_IMPORT_CODE_DUMP.md
-?? MDViewer/Services/PdfImportService.cs
-?? scripts/Export-PdfImportCodeDump.ps1
 ```
 
 ## What This Part Of The Program Does
@@ -121,8 +121,15 @@ public sealed record PdfImportResult(
     IReadOnlyList<int> MissingPages,
     IReadOnlyList<string> Warnings);
 
+public enum PdfMarkdownNormalizationMode
+{
+    PreserveLines,
+    FlowingProse
+}
+
 public sealed class PdfImportService
 {
+    private const string LineEnding = "\n";
     private const double OcrTargetScale = 3.0;
     private const double MinimumOcrScale = 0.05;
     private const int ReadableLetterThreshold = 10;
@@ -139,9 +146,10 @@ public sealed class PdfImportService
     private static readonly Regex WordRegex = new(@"\p{L}{2,}", RegexOptions.Compiled);
     private static readonly Regex RepeatedWhitespaceRegex = new(@"[ \t]{3,}", RegexOptions.Compiled);
     private static readonly Regex LeadingIndentRegex = new(@"^\s{2,}", RegexOptions.Compiled);
+    private static readonly Regex MarkdownTitleEscapeRegex = new(@"[#*_`\[\]<>\\]", RegexOptions.Compiled);
 
     private static readonly Regex BulletRegex = new(
-        @"^\s*(?<bullet>[*+\-â€¢â€£â—¦â–ªâ€“â€”]|\d+[.)])\s+(?<text>.+)$",
+        @"^\s*(?<bullet>[*+\-\u2022\u2023\u25E6\u25AA\u2013\u2014]|\d+[.)])\s+(?<text>.+)$",
         RegexOptions.Compiled);
 
     private static readonly Regex NumberedBulletRegex = new(@"^\d+[.)]$", RegexOptions.Compiled);
@@ -150,7 +158,8 @@ public sealed class PdfImportService
         string pdfPath,
         IProgress<string>? progress = null,
         CancellationToken cancellationToken = default,
-        string? ocrLanguageTag = null)
+        string? ocrLanguageTag = null,
+        PdfMarkdownNormalizationMode normalizationMode = PdfMarkdownNormalizationMode.PreserveLines)
     {
         if (string.IsNullOrWhiteSpace(pdfPath))
         {
@@ -164,7 +173,12 @@ public sealed class PdfImportService
 
         try
         {
-            return await ImportAsMarkdownCoreAsync(pdfPath, progress, cancellationToken, ocrLanguageTag).ConfigureAwait(false);
+            return await ImportAsMarkdownCoreAsync(
+                pdfPath,
+                progress,
+                cancellationToken,
+                ocrLanguageTag,
+                normalizationMode).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -186,7 +200,8 @@ public sealed class PdfImportService
         string pdfPath,
         IProgress<string>? progress,
         CancellationToken cancellationToken,
-        string? ocrLanguageTag)
+        string? ocrLanguageTag,
+        PdfMarkdownNormalizationMode normalizationMode)
     {
         progress?.Report("Reading PDF text...");
 
@@ -229,11 +244,19 @@ public sealed class PdfImportService
             warnings.Add($"No readable text was extracted from page(s): {string.Join(", ", missingPages)}.");
         }
 
-        string markdown = await Task
-            .Run(() => BuildMarkdown(pdfPath, pages), cancellationToken)
-            .ConfigureAwait(false);
-
         int embeddedTextPageCount = pages.Count(static page => !page.IsOcr && HasReadableText(page.Text));
+        string markdown = await Task
+            .Run(
+                () => BuildMarkdown(
+                    pdfPath,
+                    pages,
+                    embeddedTextPageCount,
+                    ocrPages,
+                    missingPages,
+                    warnings,
+                    normalizationMode),
+                cancellationToken)
+            .ConfigureAwait(false);
 
         return new PdfImportResult(
             markdown,
@@ -320,14 +343,15 @@ public sealed class PdfImportService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            PdfPageText pageText = pages[pageIndex];
+            int arrayIndex = checked((int)pageIndex);
+            PdfPageText pageText = pages[arrayIndex];
 
             if (!ShouldRunOcr(pageText))
             {
                 continue;
             }
 
-            int pageNumber = (int)pageIndex + 1;
+            int pageNumber = arrayIndex + 1;
             progress?.Report($"Running OCR on page {pageNumber:N0} of {pageCount:N0}...");
 
             try
@@ -340,8 +364,15 @@ public sealed class PdfImportService
                     continue;
                 }
 
-                pages[pageIndex] = pageText with { Text = ocrText, IsOcr = true };
-                ocrPages.Add(pageNumber);
+                if (ShouldUseOcrText(pageText.Text, ocrText))
+                {
+                    pages[arrayIndex] = pageText with { Text = ocrText, IsOcr = true };
+                    ocrPages.Add(pageNumber);
+                }
+                else if (HasReadableText(ocrText))
+                {
+                    warnings.Add($"OCR on page {pageNumber:N0} was not used because embedded text looked better.");
+                }
             }
             catch (OperationCanceledException)
             {
@@ -404,6 +435,11 @@ public sealed class PdfImportService
             .CreateAsync(stream)
             .AsTask(cancellationToken)
             .ConfigureAwait(false);
+
+        if (decoder is null)
+        {
+            return string.Empty;
+        }
 
         using SoftwareBitmap bitmap = await decoder
             .GetSoftwareBitmapAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied)
@@ -468,19 +504,24 @@ public sealed class PdfImportService
         };
     }
 
-    private static string BuildMarkdown(string pdfPath, PdfPageText[] pages)
+    private static string BuildMarkdown(
+        string pdfPath,
+        PdfPageText[] pages,
+        int embeddedTextPageCount,
+        IReadOnlyList<int> ocrPages,
+        IReadOnlyList<int> missingPages,
+        IReadOnlyList<string> warnings,
+        PdfMarkdownNormalizationMode normalizationMode)
     {
         var markdown = new StringBuilder();
-        string title = Path.GetFileNameWithoutExtension(pdfPath);
+        string title = SanitizeMarkdownTitle(Path.GetFileNameWithoutExtension(pdfPath));
 
-        if (string.IsNullOrWhiteSpace(title))
-        {
-            title = "Untitled";
-        }
+        AppendDiagnosticsComment(markdown, pages.Length, embeddedTextPageCount, ocrPages, missingPages, warnings);
 
         markdown.Append("# ");
-        markdown.AppendLine(title);
-        markdown.AppendLine();
+        markdown.Append(title);
+        markdown.Append(LineEnding);
+        markdown.Append(LineEnding);
 
         foreach (PdfPageText page in pages)
         {
@@ -489,30 +530,58 @@ public sealed class PdfImportService
                 continue;
             }
 
-            string pageMarkdown = NormalizePageText(page.Text);
+            string pageMarkdown = NormalizePageText(page.Text, normalizationMode);
 
             if (string.IsNullOrWhiteSpace(pageMarkdown))
             {
                 continue;
             }
 
-            markdown.AppendLine($"<!-- Page {page.Number} -->");
-            markdown.AppendLine();
-            markdown.AppendLine(pageMarkdown);
-            markdown.AppendLine();
+            markdown.Append("<!-- Page ");
+            markdown.Append(page.Number);
+            markdown.Append(" -->");
+            markdown.Append(LineEnding);
+            markdown.Append(LineEnding);
+            markdown.Append(pageMarkdown);
+            markdown.Append(LineEnding);
+            markdown.Append(LineEnding);
         }
 
-        return markdown.ToString().TrimEnd() + Environment.NewLine;
+        return NormalizeLineEndings(markdown.ToString()).TrimEnd() + LineEnding;
     }
 
-    private static string NormalizePageText(string text)
+    private static string NormalizePageText(string text, PdfMarkdownNormalizationMode normalizationMode)
+    {
+        return normalizationMode == PdfMarkdownNormalizationMode.PreserveLines
+            ? NormalizePageTextPreserveLines(text)
+            : NormalizePageTextFlowingProse(text);
+    }
+
+    private static string NormalizePageTextPreserveLines(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
         {
             return string.Empty;
         }
 
-        string normalized = text.Replace("\r\n", "\n").Replace('\r', '\n');
+        string normalized = NormalizeLineEndings(text);
+        normalized = HyphenatedLineBreakRegex.Replace(normalized, "${prefix}${suffix}");
+
+        var lines = normalized
+            .Split('\n')
+            .Select(NormalizePreservedLine);
+
+        return ExcessBlankLineRegex.Replace(string.Join(LineEnding, lines).Trim(), "\n\n");
+    }
+
+    private static string NormalizePageTextFlowingProse(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return string.Empty;
+        }
+
+        string normalized = NormalizeLineEndings(text);
         normalized = HyphenatedLineBreakRegex.Replace(normalized, "${prefix}${suffix}");
 
         string[] lines = normalized.Split('\n');
@@ -542,7 +611,8 @@ public sealed class PdfImportService
             if (ShouldPreserveLineBreak(rawLine))
             {
                 FlushParagraph(markdown, paragraph);
-                markdown.AppendLine(NormalizePreservedLine(rawLine));
+                markdown.Append(NormalizePreservedLine(rawLine));
+                markdown.Append(LineEnding);
                 continue;
             }
 
@@ -561,34 +631,78 @@ public sealed class PdfImportService
 
     private static bool HasReadableText(string? text)
     {
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return false;
-        }
-
-        int letters = text.Count(char.IsLetter);
-
-        if (letters >= ReadableLetterThreshold)
-        {
-            return true;
-        }
-
-        return WordRegex.Matches(text).Count >= ReadableWordThreshold;
+        return TextQualityScore(text) >= ReadableLetterThreshold ||
+            CountWords(text) >= ReadableWordThreshold;
     }
 
     private static bool ShouldRunOcr(PdfPageText page)
     {
-        string text = page.Text;
+        return LooksLikeBadTextLayer(page.Text);
+    }
 
+    private static bool LooksLikeBadTextLayer(string? text)
+    {
         if (string.IsNullOrWhiteSpace(text))
         {
             return true;
         }
 
+        int chars = text.Length;
         int letters = text.Count(char.IsLetter);
         int words = WordRegex.Matches(text).Count;
+        int replacementChars = text.Count(static character => character == '\uFFFD');
+        int controlChars = text.Count(static character =>
+            char.IsControl(character) &&
+            character is not '\r' and not '\n' and not '\t');
 
-        return letters < OcrCandidateLetterThreshold || words < OcrCandidateWordThreshold;
+        double letterRatio = chars == 0 ? 0 : (double)letters / chars;
+
+        return
+            words < OcrCandidateWordThreshold ||
+            letters < OcrCandidateLetterThreshold ||
+            replacementChars > 0 ||
+            controlChars > 0 ||
+            letterRatio < 0.25;
+    }
+
+    private static bool ShouldUseOcrText(string embeddedText, string ocrText)
+    {
+        if (!HasReadableText(ocrText))
+        {
+            return false;
+        }
+
+        if (!HasReadableText(embeddedText))
+        {
+            return true;
+        }
+
+        int embeddedScore = TextQualityScore(embeddedText);
+        int ocrScore = TextQualityScore(ocrText);
+
+        return ocrScore > embeddedScore * 2 || ocrScore >= embeddedScore + 120;
+    }
+
+    private static int TextQualityScore(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return 0;
+        }
+
+        int letters = text.Count(char.IsLetter);
+        int words = WordRegex.Matches(text).Count;
+        int replacementChars = text.Count(static character => character == '\uFFFD');
+        int controlChars = text.Count(static character =>
+            char.IsControl(character) &&
+            character is not '\r' and not '\n' and not '\t');
+
+        return letters + words * 5 - replacementChars * 20 - controlChars * 10;
+    }
+
+    private static int CountWords(string? text)
+    {
+        return string.IsNullOrWhiteSpace(text) ? 0 : WordRegex.Matches(text).Count;
     }
 
     private static bool ShouldPreserveLineBreak(string rawLine)
@@ -619,16 +733,20 @@ public sealed class PdfImportService
 
         if (NumberedBulletRegex.IsMatch(bullet))
         {
+            string number = bullet.TrimEnd('.', ')');
+
             markdown.Append(indent);
-            markdown.Append(bullet.TrimEnd(')'));
-            markdown.Append(' ');
-            markdown.AppendLine(itemText);
+            markdown.Append(number);
+            markdown.Append(". ");
+            markdown.Append(itemText);
+            markdown.Append(LineEnding);
             return;
         }
 
         markdown.Append(indent);
         markdown.Append("- ");
-        markdown.AppendLine(itemText);
+        markdown.Append(itemText);
+        markdown.Append(LineEnding);
     }
 
     private static string GetMarkdownListIndent(string rawLine)
@@ -645,9 +763,62 @@ public sealed class PdfImportService
             return;
         }
 
-        markdown.AppendLine(paragraph.ToString());
-        markdown.AppendLine();
+        markdown.Append(paragraph);
+        markdown.Append(LineEnding);
+        markdown.Append(LineEnding);
         paragraph.Clear();
+    }
+
+    private static void AppendDiagnosticsComment(
+        StringBuilder markdown,
+        int pageCount,
+        int embeddedTextPageCount,
+        IReadOnlyList<int> ocrPages,
+        IReadOnlyList<int> missingPages,
+        IReadOnlyList<string> warnings)
+    {
+        markdown.Append("<!--");
+        markdown.Append(LineEnding);
+        markdown.Append("PDF import: ");
+        markdown.Append(pageCount);
+        markdown.Append(" page(s)");
+        markdown.Append(LineEnding);
+        markdown.Append("Embedded text pages: ");
+        markdown.Append(embeddedTextPageCount);
+        markdown.Append(LineEnding);
+        markdown.Append("OCR pages: ");
+        markdown.Append(ocrPages.Count == 0 ? "none" : string.Join(", ", ocrPages));
+        markdown.Append(LineEnding);
+        markdown.Append("Missing pages: ");
+        markdown.Append(missingPages.Count == 0 ? "none" : string.Join(", ", missingPages));
+        markdown.Append(LineEnding);
+
+        foreach (string warning in warnings)
+        {
+            markdown.Append("Warning: ");
+            markdown.Append(warning);
+            markdown.Append(LineEnding);
+        }
+
+        markdown.Append("-->");
+        markdown.Append(LineEnding);
+        markdown.Append(LineEnding);
+    }
+
+    private static string SanitizeMarkdownTitle(string? title)
+    {
+        if (string.IsNullOrWhiteSpace(title))
+        {
+            return "Untitled";
+        }
+
+        string sanitized = MarkdownTitleEscapeRegex.Replace(title, string.Empty).Trim();
+        return string.IsNullOrWhiteSpace(sanitized) ? "Untitled" : sanitized;
+    }
+
+    private static string NormalizeLineEndings(string text)
+    {
+        return text.Replace("\r\n", "\n").Replace('\r', '\n');
     }
 
     private sealed record PdfPageText(int Number, string Text, bool IsOcr);
@@ -718,6 +889,10 @@ public partial class MainViewModel : ObservableObject
     private bool _isFetchingPandoc;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(FileImportCancelVisibility))]
+    private bool _isFileImporting;
+
+    [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(StatusMessage))]
     private string _crawlStatus = string.Empty;
 
@@ -746,6 +921,7 @@ public partial class MainViewModel : ObservableObject
     private Func<Task<string?>> _promptForUrlAsync = static () => Task.FromResult<string?>(null);
     private Action _exitApplication = static () => { };
     private CancellationTokenSource? _crawlCancellation;
+    private CancellationTokenSource? _fileImportCancellation;
 
     public bool CanRenderRichMarkdown => true;
 
@@ -758,6 +934,8 @@ public partial class MainViewModel : ObservableObject
     public Visibility RawViewVisibility => IsRawView ? Visibility.Visible : Visibility.Collapsed;
 
     public Visibility CrawlOverlayVisibility => IsCrawling ? Visibility.Visible : Visibility.Collapsed;
+
+    public Visibility FileImportCancelVisibility => IsFileImporting ? Visibility.Visible : Visibility.Collapsed;
 
     public bool CanFetchPandoc => !IsCrawling && !IsFetchingPandoc;
 
@@ -821,6 +999,12 @@ public partial class MainViewModel : ObservableObject
     {
         try
         {
+            if (IsFileImporting)
+            {
+                DocumentStatus = "A file import is already in progress.";
+                return;
+            }
+
             string? filePath = await _pickOpenFileAsync();
 
             if (string.IsNullOrWhiteSpace(filePath))
@@ -929,6 +1113,8 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private void CloseDocument()
     {
+        _fileImportCancellation?.Cancel();
+
         SetCurrentDocument(new DocumentContext
         {
             SourceFilePath = null,
@@ -1038,6 +1224,13 @@ public partial class MainViewModel : ObservableObject
     }
 
     [RelayCommand]
+    private void CancelFileImport()
+    {
+        _fileImportCancellation?.Cancel();
+        DocumentStatus = "Cancelling import...";
+    }
+
+    [RelayCommand]
     private void ZoomIn()
     {
         ZoomPercent = Math.Min(MaximumZoomPercent, ZoomPercent + ZoomStepPercent);
@@ -1077,7 +1270,7 @@ public partial class MainViewModel : ObservableObject
             return;
         }
 
-        if (extension == ".docx" || extension == ".html" || extension == ".epub")
+        if (extension == ".docx" || extension == ".html" || extension == ".htm" || extension == ".epub")
         {
             string rawMarkdown = await _pandocService.ImportAsMarkdownAsync(filePath);
 
@@ -1094,17 +1287,38 @@ public partial class MainViewModel : ObservableObject
 
         if (extension == ".pdf")
         {
-            var progress = new Progress<string>(status => DocumentStatus = status);
-            PdfImportResult result = await _pdfImportService.ImportAsMarkdownAsync(filePath, progress);
+            _fileImportCancellation?.Dispose();
+            _fileImportCancellation = new CancellationTokenSource();
+            IsFileImporting = true;
 
-            SetCurrentDocument(new DocumentContext
+            try
             {
-                SourceFilePath = filePath,
-                Origin = DocumentOrigin.ImportedForeign,
-                RawMarkdown = result.Markdown
-            });
+                var progress = new Progress<string>(status => DocumentStatus = status);
+                PdfImportResult result = await _pdfImportService.ImportAsMarkdownAsync(
+                    filePath,
+                    progress,
+                    _fileImportCancellation.Token);
 
-            DocumentStatus = BuildPdfImportStatus(Path.GetFileName(filePath), result);
+                SetCurrentDocument(new DocumentContext
+                {
+                    SourceFilePath = filePath,
+                    Origin = DocumentOrigin.ImportedForeign,
+                    RawMarkdown = result.Markdown
+                });
+
+                DocumentStatus = BuildPdfImportStatus(Path.GetFileName(filePath), result);
+            }
+            catch (OperationCanceledException)
+            {
+                DocumentStatus = "PDF import cancelled.";
+            }
+            finally
+            {
+                IsFileImporting = false;
+                _fileImportCancellation?.Dispose();
+                _fileImportCancellation = null;
+            }
+
             return;
         }
 
@@ -1453,14 +1667,6 @@ public sealed partial class MainPage : Page
         RichMarkdownTextBlock.Width = availableWidth;
     }
 
-    private void HeadingTreeView_ItemInvoked(TreeView sender, TreeViewItemInvokedEventArgs args)
-    {
-        if (TryGetHeadingNode(args.InvokedItem, out HeadingNode? heading) && heading is not null)
-        {
-            NavigateToHeading(heading);
-        }
-    }
-
     private void HeadingTreeView_SelectionChanged(TreeView sender, TreeViewSelectionChangedEventArgs args)
     {
         if (TryGetHeadingNode(sender.SelectedItem, out HeadingNode? heading) && heading is not null)
@@ -1491,15 +1697,13 @@ public sealed partial class MainPage : Page
 
     private void NavigateRichTextToHeading(HeadingNode heading)
     {
-        RichMarkdownScrollViewer.UpdateLayout();
-
         if (TryFindRenderedHeading(heading, out FrameworkElement? target) && target is not null)
         {
             ScrollElementIntoView(target);
             return;
         }
 
-        int totalLines = Math.Max(1, CountLines(ViewModel.CurrentDocument.RawMarkdown));
+        int totalLines = Math.Max(1, ViewModel.LineCount);
         double position = (double)Math.Max(0, heading.LineNumber - 1) / totalLines;
         double targetOffset = position * RichMarkdownScrollViewer.ScrollableHeight;
 
@@ -1535,14 +1739,14 @@ public sealed partial class MainPage : Page
             ? headingSizedMatches
             : textMatches;
 
-        if (candidates.Count == 0)
+        if (candidates.Count == 0 || candidates.Count <= heading.RenderOccurrence)
         {
             target = null;
             return false;
         }
 
         candidates.Sort(CompareByVerticalPosition);
-        target = candidates[Math.Min(heading.RenderOccurrence, candidates.Count - 1)];
+        target = candidates[heading.RenderOccurrence];
         return true;
     }
 
@@ -1686,26 +1890,6 @@ public sealed partial class MainPage : Page
         return heading is not null;
     }
 
-    private static int CountLines(string text)
-    {
-        if (text.Length == 0)
-        {
-            return 1;
-        }
-
-        int count = 1;
-
-        foreach (char character in text)
-        {
-            if (character == '\n')
-            {
-                count++;
-            }
-        }
-
-        return count;
-    }
-
     private async Task<string?> PickOpenFilePathAsync()
     {
         var picker = new FileOpenPicker
@@ -1718,13 +1902,25 @@ public sealed partial class MainPage : Page
         picker.FileTypeFilter.Add(".txt");
         picker.FileTypeFilter.Add(".docx");
         picker.FileTypeFilter.Add(".html");
+        picker.FileTypeFilter.Add(".htm");
         picker.FileTypeFilter.Add(".epub");
         picker.FileTypeFilter.Add(".pdf");
 
         InitializePickerWithMainWindow(picker);
 
         Windows.Storage.StorageFile? file = await picker.PickSingleFileAsync();
-        return file?.Path;
+
+        if (file is null)
+        {
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(file.Path))
+        {
+            throw new InvalidOperationException("The selected file does not have a local filesystem path. Copy it locally and try again.");
+        }
+
+        return file.Path;
     }
 
     public async Task OpenExternalFileAsync(string filePath)
@@ -1858,6 +2054,13 @@ public sealed partial class MainPage : Page
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="AngleSharp" Version="1.4.0" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.2" />
@@ -1870,6 +2073,8 @@ public sealed partial class MainPage : Page
   </ItemGroup>
 
   <ItemGroup>
+    <!-- App assets are copied for local builds. Release publishing is intentionally single-file;
+         bundled tool downloads such as pandoc.exe are handled separately by app services. -->
     <Content Include="..\Assets\**\*">
       <Link>Assets\%(RecursiveDir)%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -1899,7 +2104,7 @@ MDViewer is a Windows Markdown viewer and conversion tool built with WinUI 3. It
 - Save Markdown as `.md` or `.txt`.
 - Format Markdown through Pandoc using Pandoc Markdown, ATX headings, and no hard wrapping.
 - Reflow heading levels into a cleaner hierarchy.
-- Import `.docx`, `.html`, and `.epub` into Markdown through Pandoc.
+- Import `.docx`, `.html`, `.htm`, and `.epub` into Markdown through Pandoc.
 - Import `.pdf` with native C# text extraction and Windows OCR fallback for image-only pages.
 - Export Markdown through Pandoc to `.docx`, `.html`, `.epub`, `.rtf`, `.odt`, `.tex`, `.typ`, `.rst`, and `.org`.
 - Crawl documentation sites into Markdown with a conservative single-threaded crawler that respects `robots.txt`.
@@ -1928,7 +2133,7 @@ If the folder containing `MDViewer.exe` is not writable, move the app to a writa
 
 ## PDF Import
 
-PDF import is built in and does not require Python, Marker, or model downloads. MDViewer extracts embedded PDF text first, then uses Windows OCR for pages that appear to be image-only. Complex tables and multi-column layouts may still need review after import.
+PDF import is built in and does not require Python, Marker, or model downloads. MDViewer extracts embedded PDF text first, then uses Windows OCR for pages with missing or weak text. Imported Markdown includes a hidden diagnostics comment with page, OCR, warning, and missing-page details.
 
 ## Building From Source
 
@@ -1981,7 +2186,7 @@ This release ships `MDViewer.exe`, a self-contained Windows x64 build of MDViewe
 - Saves Markdown back to `.md` or `.txt`.
 - Formats Markdown through Pandoc using Pandoc Markdown, ATX headings, and no hard wrapping.
 - Reflows heading levels into a cleaner hierarchy and warns when manual tables of contents or anchor links may need review.
-- Imports `.docx`, `.html`, and `.epub` into Markdown through Pandoc.
+- Imports `.docx`, `.html`, `.htm`, and `.epub` into Markdown through Pandoc.
 - Imports `.pdf` with native C# text extraction and Windows OCR fallback for image-only pages.
 - Exports Markdown through Pandoc to `.docx`, `.html`, `.epub`, `.rtf`, `.odt`, `.tex`, `.typ`, `.rst`, and `.org`.
 - Crawls documentation sites into Markdown with a polite single-threaded crawler that respects `robots.txt`, keeps to the same base path, and caps crawls at 250 pages.
@@ -2008,7 +2213,7 @@ MDViewer checks for Pandoc in this order: `pandoc.exe` beside `MDViewer.exe`, ap
 
 ## PDF Import
 
-PDF import is built in and does not require Python, Marker, or model downloads. MDViewer extracts embedded PDF text first, then uses Windows OCR for pages that appear to be image-only. Complex tables and multi-column layouts may still need review after import.
+PDF import is built in and does not require Python, Marker, or model downloads. MDViewer extracts embedded PDF text first, then uses Windows OCR for pages with missing or weak text. Imported Markdown includes a hidden diagnostics comment with page, OCR, warning, and missing-page details.
 
 ## Running The App
 
@@ -2026,4 +2231,8 @@ Because this build is distributed as a direct executable, Windows SmartScreen ma
 - Imported and crawled Markdown may still need review when source documents contain complex tables, unusual HTML, or hand-written heading anchors.
 
 ``
+
+# Current Git Diff
+
+_No diff for the PDF import files._
 
